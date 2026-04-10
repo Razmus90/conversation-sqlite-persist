@@ -1,34 +1,24 @@
 {
   "name": "conversation-sqlite-persist",
-  "version": "1.0.0",
-  "description": "Zero-miss conversation persistence for Claude Code. Auto-saves all conversations to SQLite.",
+  "version": "1.2.0",
+  "description": "Menu untuk save/load/summarize conversation dari SQLite database.",
   "type": "skill",
   "entrypoint": "skills/conversation-sqlite-persist/SKILL.md",
   "hooks": {
-    "beforeSubmitPrompt": [
+    "UserPromptSubmit": [
       {
-        "command": "node hooks/detect-clear.js",
-        "description": "Detect /clear and backup before clear"
-      },
-      {
-        "command": "node hooks/capture-user-message.js",
-        "description": "Capture user messages to SQLite"
+        "command": "node hooks/detect-conversation-persist.js",
+        "description": "Detect /conversation-sqlite-persist and inject menu context"
       }
     ],
-    "preCompact": [
+    "Stop": [
       {
-        "command": "node hooks/pre-compact-backup.js",
-        "description": "Backup before context compaction"
-      }
-    ],
-    "sessionEnd": [
-      {
-        "command": "node hooks/final-save.js",
-        "description": "Final save on session end"
+        "command": "node hooks/auto-save.js",
+        "description": "Auto-save conversation to SQLite on AI response complete"
       }
     ]
   },
   "dependencies": {
-    "better-sqlite3": "^11.0.0"
+    "sqlite3": "^5.1.0"
   }
 }

@@ -2,14 +2,14 @@
 
 # conversation-sqlite-persist
 
-**Zero-miss conversation persistence for Claude Code**
-
-Never lose a conversation again. Every message. Every session. Forever searchable.
+**Save every Claude Code conversation to SQLite. Never lose context again.**
 
 [![npm version](https://img.shields.io/npm/v/conversation-sqlite-persist)](https://www.npmjs.com/package/conversation-sqlite-persist)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D18-brightgreen)](https://nodejs.org)
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-compatible-orange)](https://docs.anthropic.com/claude-code)
+
+[Install](#-install) · [How It Works](#-how-it-works) · [CLI](#-cli-reference) · [Menu](#-interactive-menu) · [FAQ](#-faq)
 
 </div>
 
@@ -17,22 +17,19 @@ Never lose a conversation again. Every message. Every session. Forever searchabl
 
 ## The Problem
 
-You're deep in a debugging session. Context window fills up. Claude compacts. **Your conversation is gone.**
+You're deep in a debugging session. Context fills up. `/clear` fires. **Your conversation is gone.**
 
-Or worse — you type `/clear` by accident. Weeks of context, vanished.
+No transcript. No history. Start from zero.
 
 ## The Solution
 
-`conversation-sqlite-persist` intercepts every message at the hook level and saves it to SQLite. When `/clear` fires, it backs up first. When compaction kicks in, it backs up first. When the session ends, it saves everything.
-
-**Zero data loss. Guaranteed.**
+`conversation-sqlite-persist` hooks into Claude Code and auto-saves every conversation to a local SQLite database — with an interactive menu to retrieve, summarize, and resume any past session.
 
 ```
-User types message ──► Saved to SQLite instantly
-/clear detected     ──► Backup → then clear
-Context full        ──► Backup → then compact
-Session ends        ──► Final save → cleanup
-90 days pass        ──► Auto-archive to separate DB
+Every message  ──►  Saved to SQLite in real-time
+/clear fires   ──►  Transcript backed up before clear
+Session ends   ──►  Everything finalized to DB
+Type /menu     ──►  Browse, search, resume any session
 ```
 
 ---
@@ -43,48 +40,103 @@ Session ends        ──► Final save → cleanup
 npx conversation-sqlite-persist@latest
 ```
 
-Restart Claude Code. That's it. Conversations now auto-save.
+Restart Claude Code. Done. Every conversation now auto-saves.
 
 ---
 
 ## How It Works
 
-### 4-Layer Hook Architecture
+### Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                     CLAUDE CODE SESSION                      │
-│                                                              │
-│  ┌──────────────────┐    ┌──────────────────────────────┐   │
-│  │ beforeSubmit     │───►│ Layer 1: Real-Time Capture    │   │
-│  │ Prompt           │    │ → Buffer + SQLite              │   │
-│  └──────────────────┘    └──────────────────────────────┘   │
-│                                                              │
-│  ┌──────────────────┐    ┌──────────────────────────────┐   │
-│  │ /clear command   │───►│ Layer 2: Pre-Clear Backup     │   │
-│  │                  │    │ → Full transcript → JSON       │   │
-│  └──────────────────┘    └──────────────────────────────┘   │
-│                                                              │
-│  ┌──────────────────┐    ┌──────────────────────────────┐   │
-│  │ Context full     │───►│ Layer 3: Pre-Compact Backup   │   │
-│  │                  │    │ → Full transcript → JSON       │   │
-│  └──────────────────┘    └──────────────────────────────┘   │
-│                                                              │
-│  ┌──────────────────┐    ┌──────────────────────────────┐   │
-│  │ Session ends     │───►│ Layer 4: Final Save           │   │
-│  │                  │    │ → Final backup + cleanup       │   │
-│  └──────────────────┘    └──────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────┐
+│                    CLAUDE CODE                           │
+│                                                         │
+│   User Prompt ──► UserPromptSubmit Hook                 │
+│                    ├── detect-conversation-persist.js    │
+│                    │   └─ Detects /command, injects menu│
+│                    └── auto-save.js (Stop hook)         │
+│                        └─ Parses transcript → SQLite    │
+│                                                         │
+└──────────────────────┬──────────────────────────────────┘
+                       │
+                       ▼
+              ┌─────────────────┐
+              │  conversations  │
+              │      .db        │
+              │                 │
+              │  sessions       │
+              │  messages       │
+              └─────────────────┘
 ```
+
+### What Gets Saved
+
+| Source | Method |
+|--------|--------|
+| Every user message | Real-time buffer write |
+| Full conversation | Transcript parsing on Stop hook |
+| Manual save | `/conversation-sqlite-persist` → generate/update |
+| Before `/clear` | Detect hook backs up to JSON |
 
 ### Storage
 
-| File | Purpose |
-|------|---------|
-| `~/.claude/conversations.db` | Active sessions (< 90 days) |
-| `~/.claude/conversations-archive.db` | Archived sessions (> 90 days) |
-| `~/.claude/backups/` | Event-specific JSON backups |
-| `~/.claude/buffer/` | Real-time message buffers |
+```
+~/.claude/
+├── conversations.db                      # SQLite database
+├── hooks/
+│   ├── db-utils.js                       # DB layer (sqlite3)
+│   ├── detect-conversation-persist.js    # Menu injection hook
+│   └── auto-save.js                      # Auto-save on session stop
+├── skills/conversation-sqlite-persist/
+│   ├── SKILL.md                          # Skill definition
+│   ├── menu.json                         # Interactive menu config
+│   └── skill-actions.js                  # CLI: save, read, clear
+└── backups/                              # JSON backups (clear events)
+```
+
+---
+
+## Interactive Menu
+
+Type `/conversation-sqlite-persist` in Claude Code to open the menu:
+
+```
+1. generate/update   — Save/update this session to SQLite
+2. load              — Save → read → summarize → resume
+3. cancel            — Do nothing
+```
+
+### generate/update
+Saves the current conversation to the database. Safe to run anytime — uses `INSERT OR IGNORE` to prevent duplicates.
+
+### load
+The full workflow:
+
+```
+Save session → Read messages → Clear screen → Show summary
+```
+
+Generates a hybrid summary with:
+
+```markdown
+# Session Resume — {session-id}
+
+## Konteks
+- **Topik aktif**: What was being discussed
+- **Status**: IN PROGRESS / BLOCKED / COMPLETED
+- **Keputusan kritis**: Key decisions made
+- **Files dimodifikasi**: Files changed
+
+## Langkah Selanjutnya
+- [ ] Next steps or open tasks
+
+## Timeline Detail
+| Waktu | Event | Keterangan |
+|-------|-------|------------|
+| 14:30 | feature | Started auth refactor |
+| 14:45 | bugfix | Fixed token expiry edge case |
+```
 
 ---
 
@@ -94,7 +146,7 @@ Restart Claude Code. That's it. Conversations now auto-save.
 conv-persist <command> [options]
 ```
 
-### `status` — Overview
+### status
 
 ```bash
 conv-persist status
@@ -105,163 +157,134 @@ conv-persist status
     Sessions:  47
     Messages:  2,341
     Size:      1.23 MB
-
-  Archive Database (conversations-archive.db):
-    Sessions:  128
-    Messages:  8,729
-    Size:      4.56 MB
+    Oldest:    2026-01-15T09:30:00Z
+    Newest:    2026-04-10T18:00:00Z
 ```
 
-### `list` — Browse Sessions
+### list
 
 ```bash
-conv-persist list                    # active sessions
-conv-persist list --archived         # archived sessions
-conv-persist list --limit 10         # pagination
+conv-persist list                    # last 20 sessions
+conv-persist list --limit 50         # more sessions
 ```
 
-### `query` — Search Everything
+### query
 
 ```bash
-# Search active conversations
-conv-persist query "SELECT * FROM messages WHERE content LIKE '%authentication%'"
-
-# Search archived conversations
-conv-persist query "SELECT * FROM messages WHERE content LIKE '%authentication%'" --archived
+conv-persist query "SELECT * FROM messages WHERE content LIKE '%auth%'"
+conv-persist query "SELECT session_id, COUNT(*) as msgs FROM messages GROUP BY session_id ORDER BY msgs DESC"
 ```
 
-### `restore` — Bring Back Old Conversations
+### save
 
 ```bash
-conv-persist restore abc123          # restore one session
-conv-persist restore --all           # restore everything
+conv-persist save <session-id>       # save from transcript to DB
 ```
 
-### `export` — Save to File
+### read
 
 ```bash
-conv-persist export abc123 --format json      # JSON
-conv-persist export abc123 --format markdown  # Markdown
-conv-persist export abc123 --format csv       # CSV
-conv-persist export abc123 --format markdown -o conversation.md
+conv-persist read <session-id>       # read messages from DB
 ```
 
-### `archive` — Manual Archive
+### cleanup
 
 ```bash
-conv-persist archive                 # archive sessions > 90 days
-conv-persist archive --days 60       # custom threshold
-```
-
-### `cleanup` — Maintenance
-
-```bash
-conv-persist cleanup                                    # VACUUM + clear buffers
-conv-persist cleanup --delete-archived-older-than 365   # delete archive > 1 year
+conv-persist cleanup                 # VACUUM database
 ```
 
 ---
 
-## Archive System
-
-Old conversations don't get deleted. They get archived.
-
-```
-conversations.db (< 90 days)  ──►  conversations-archive.db (> 90 days)
-         │                                      │
-         │    restore <session-id> ◄────────────┘
-         │                                      │
-         └──► query "..." --archived ───────────┘
-```
-
-**"I didn't open Claude for 4 months. Are my conversations gone?"**
-
-No. They're in `conversations-archive.db`. Use `conv-persist list --archived` to find them, `conv-persist restore <id>` to bring them back, or `conv-persist query "..." --archived` to search directly.
-
----
-
-## Direct SQLite Access
+## Database Schema
 
 ```sql
--- Recent sessions
-SELECT id, project_path, ended_at, total_messages
-FROM sessions ORDER BY ended_at DESC LIMIT 20;
+-- Sessions
+CREATE TABLE sessions (
+    id TEXT PRIMARY KEY,
+    project_path TEXT,
+    started_at TIMESTAMP,
+    ended_at TIMESTAMP,
+    total_messages INTEGER DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
 
--- Full-text search
-SELECT s.project_path, m.role, m.content, m.timestamp
+-- Messages (deduped via unique index)
+CREATE TABLE messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    message_index INTEGER,
+    role TEXT CHECK(role IN ('user', 'assistant', 'system', 'tool', 'unknown')),
+    content TEXT,
+    tool_calls TEXT,
+    tool_results TEXT,
+    timestamp TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
+```
+
+---
+
+## Query Examples
+
+### Find conversations about a topic
+
+```sql
+SELECT s.id, s.project_path, s.ended_at, s.total_messages
 FROM messages m
 JOIN sessions s ON m.session_id = s.id
-WHERE m.content LIKE '%bug%'
-ORDER BY m.timestamp DESC;
+WHERE m.content LIKE '%deploy%'
+GROUP BY m.session_id
+ORDER BY MAX(m.timestamp) DESC
+LIMIT 10;
+```
 
--- Storage stats
+### Export a session as text
+
+```sql
+SELECT role || ' (' || timestamp || '):' || char(10) || content
+FROM messages
+WHERE session_id = 'abc123-def456'
+ORDER BY message_index ASC;
+```
+
+### Storage overview
+
+```sql
 SELECT
-  (SELECT COUNT(*) FROM sessions) as sessions,
-  (SELECT COUNT(*) FROM messages) as messages;
+  (SELECT COUNT(*) FROM sessions) as total_sessions,
+  (SELECT COUNT(*) FROM messages) as total_messages,
+  (SELECT COUNT(DISTINCT session_id) FROM messages) as sessions_with_data;
 ```
 
 ---
 
-## Directory Structure
+## FAQ
 
-```
-~/.claude/
-├── hooks/
-│   ├── db-utils.js                  # SQLite utilities (active + archive)
-│   ├── capture-user-message.js      # Real-time capture
-│   ├── detect-clear.js              # /clear detection
-│   ├── pre-compact-backup.js        # Pre-compaction backup
-│   ├── final-save.js                # Session-end save
-│   └── archive-manager.js           # Auto-archive engine
-├── bin/
-│   ├── conv-persist.js              # CLI
-│   └── conv-persist.bat             # Windows wrapper
-├── skills/conversation-sqlite-persist/
-│   └── SKILL.md                     # Skill definition
-├── conversations.db                 # Active DB
-├── conversations-archive.db         # Archive DB
-├── backups/                         # JSON backups
-└── buffer/                          # Real-time buffers
-```
+**Q: Does this slow down Claude Code?**
+A: No. Hook overhead is < 10ms per message. The Stop hook runs after the response is complete.
 
----
+**Q: Where is my data?**
+A: `~/.claude/conversations.db` on your machine. No cloud sync. No external APIs.
 
-## Privacy & Security
+**Q: Can I search old conversations?**
+A: Yes. Use `conv-persist query "..."` or open the DB with any SQLite client.
 
-| Concern | Answer |
-|---------|--------|
-| Where is data stored? | `~/.claude/` on your machine only |
-| Does it sync to cloud? | No |
-| Does it call external APIs? | No |
-| Can I encrypt the database? | Yes — use SQLite encryption extensions |
-| GDPR compliance? | `conv-persist cleanup --delete-archived-older-than 0` deletes everything |
+**Q: What if I use `/clear`?**
+A: The hook detects `/clear` and backs up the full transcript to `~/.claude/backups/` before clearing.
 
----
-
-## Performance
-
-- **< 10ms** overhead per message
-- SQLite in **WAL mode** for concurrent access
-- Buffer files **auto-rotate at 10MB**
-- Archive runs **once per session** (throttled)
-
----
-
-## Uninstall
-
+**Q: Can I uninstall it?**
+A: Remove the hooks from `~/.claude/settings.json`, then:
 ```bash
-# Remove hooks from settings.json
-# Then delete:
-rm -rf ~/.claude/hooks/{db-utils,capture-user-message,detect-clear,pre-compact-backup,final-save,archive-manager}.js
-rm -rf ~/.claude/bin/conv-persist*
+rm -rf ~/.claude/hooks/{db-utils,detect-conversation-persist,auto-save}.js
 rm -rf ~/.claude/skills/conversation-sqlite-persist
-rm -rf ~/.claude/buffer
-rm -rf ~/.claude/backups
-# Keep or delete ~/.claude/conversations.db and conversations-archive.db
+rm -rf ~/.claude/bin/conv-persist*
+# conversations.db is yours to keep or delete
 ```
 
 ---
 
 ## License
 
-MIT — Use it, fork it, ship it.
+MIT

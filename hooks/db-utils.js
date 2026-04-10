@@ -1,410 +1,269 @@
-/**
- * db-utils.js
- * SQLite database utilities for conversation persistence.
- * Shared by all hook scripts.
- */
-
-const Database = require('better-sqlite3');
-const path = require('path');
+#!/usr/bin/env node
+const sqlite3 = require('sqlite3');
 const fs = require('fs');
-const os = require('os');
+const path = require('path');
 
-const CLAUDE_DIR = path.join(os.homedir(), '.claude');
-const DB_PATH = path.join(CLAUDE_DIR, 'conversations.db');
-const ARCHIVE_DB_PATH = path.join(CLAUDE_DIR, 'conversations-archive.db');
-const BUFFER_DIR = path.join(CLAUDE_DIR, 'buffer');
+const HOME = process.env.HOME || process.env.USERPROFILE;
+const DB_PATH = path.join(HOME, '.claude', 'conversations.db');
 
-function getDb() {
-  const db = new Database(DB_PATH);
-  db.pragma('journal_mode = WAL');
-  db.pragma('synchronous = NORMAL');
-  return db;
+const SCHEMA_SQL = [
+    `CREATE TABLE IF NOT EXISTS sessions (
+        id TEXT PRIMARY KEY,
+        project_path TEXT,
+        started_at TIMESTAMP,
+        ended_at TIMESTAMP,
+        total_messages INTEGER DEFAULT 0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )`,
+    `CREATE TABLE IF NOT EXISTS messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL,
+        message_index INTEGER,
+        role TEXT CHECK(role IN ('user', 'assistant', 'system', 'tool', 'unknown')),
+        content TEXT,
+        tool_calls TEXT,
+        tool_results TEXT,
+        timestamp TIMESTAMP,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+    )`,
+    'CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_path)',
+    'CREATE INDEX IF NOT EXISTS idx_sessions_time ON sessions(ended_at)',
+    'CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id)',
+    'CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_unique ON messages(session_id, message_index) WHERE message_index IS NOT NULL'
+];
+
+// Initialize database — waits for DDL to complete before resolving
+function initDatabase() {
+    return new Promise((resolve, reject) => {
+        const db = new sqlite3.Database(DB_PATH);
+        db.serialize(() => {
+            for (let i = 0; i < SCHEMA_SQL.length; i++) {
+                if (i === SCHEMA_SQL.length - 1) {
+                    db.run(SCHEMA_SQL[i], (err) => {
+                        db.close();
+                        if (err) reject(err);
+                        else resolve();
+                    });
+                } else {
+                    db.run(SCHEMA_SQL[i]);
+                }
+            }
+        });
+    });
 }
 
-function initDb() {
-  const dir = path.dirname(DB_PATH);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  if (!fs.existsSync(BUFFER_DIR)) fs.mkdirSync(BUFFER_DIR, { recursive: true });
-
-  const db = getDb();
-
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS sessions (
-      id TEXT PRIMARY KEY,
-      project_path TEXT,
-      started_at TEXT DEFAULT (datetime('now')),
-      ended_at TEXT,
-      total_messages INTEGER DEFAULT 0
-    );
-
-    CREATE TABLE IF NOT EXISTS messages (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      session_id TEXT NOT NULL,
-      role TEXT NOT NULL,
-      content TEXT NOT NULL,
-      timestamp TEXT DEFAULT (datetime('now')),
-      FOREIGN KEY (session_id) REFERENCES sessions(id)
-    );
-
-    CREATE TABLE IF NOT EXISTS clear_events (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      session_id TEXT NOT NULL,
-      event_type TEXT NOT NULL,
-      backup_timestamp TEXT DEFAULT (datetime('now')),
-      messages_backup_count INTEGER DEFAULT 0,
-      backup_path TEXT,
-      FOREIGN KEY (session_id) REFERENCES sessions(id)
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
-    CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
-    CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_path);
-  `);
-
-  db.close();
+// Save session to database
+function saveSession(session_id, project_path, total_messages = 0) {
+    return new Promise((resolve, reject) => {
+        const db = new sqlite3.Database(DB_PATH);
+        db.run(
+            `INSERT INTO sessions (id, project_path, started_at, ended_at, total_messages)
+             VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?)
+             ON CONFLICT(id) DO UPDATE SET
+               ended_at = CURRENT_TIMESTAMP,
+               total_messages = MAX(total_messages, excluded.total_messages),
+               updated_at = CURRENT_TIMESTAMP`,
+            [session_id, project_path, total_messages],
+            function(err) {
+                db.close();
+                if (err) reject(err);
+                else resolve(this.lastID);
+            }
+        );
+    });
 }
 
-function createSession(sessionId, projectPath) {
-  const db = getDb();
-  const stmt = db.prepare(
-    'INSERT OR IGNORE INTO sessions (id, project_path) VALUES (?, ?)'
-  );
-  stmt.run(sessionId, projectPath);
-  db.close();
+// Save message to database — INSERT OR IGNORE prevents duplicates
+function saveMessage(message) {
+    return new Promise((resolve, reject) => {
+        const db = new sqlite3.Database(DB_PATH);
+        db.run(
+            `INSERT OR IGNORE INTO messages
+             (session_id, message_index, role, content, tool_calls, tool_results, timestamp)
+             VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            [
+                message.session_id,
+                message.message_index,
+                message.role,
+                typeof message.content === 'string' ? message.content : JSON.stringify(message.content || ''),
+                JSON.stringify(message.tool_calls || []),
+                JSON.stringify(message.tool_results || []),
+                message.timestamp || new Date().toISOString()
+            ],
+            function(err) {
+                db.close();
+                if (err) reject(err);
+                else resolve(this.lastID);
+            }
+        );
+    });
 }
 
-function insertMessage(sessionId, role, content) {
-  const db = getDb();
-  const stmt = db.prepare(
-    'INSERT INTO messages (session_id, role, content) VALUES (?, ?, ?)'
-  );
-  const result = stmt.run(sessionId, role, content);
-
-  db.prepare(
-    'UPDATE sessions SET total_messages = total_messages + 1 WHERE id = ?'
-  ).run(sessionId);
-
-  db.close();
-  return result;
-}
-
-function insertClearEvent(sessionId, eventType, messageCount, backupPath) {
-  const db = getDb();
-  const stmt = db.prepare(
-    'INSERT INTO clear_events (session_id, event_type, messages_backup_count, backup_path) VALUES (?, ?, ?, ?)'
-  );
-  const result = stmt.run(sessionId, eventType, messageCount, backupPath);
-  db.close();
-  return result;
-}
-
-function getSessionMessages(sessionId) {
-  const db = getDb();
-  const rows = db.prepare(
-    'SELECT role, content, timestamp FROM messages WHERE session_id = ? ORDER BY id ASC'
-  ).all(sessionId);
-  db.close();
-  return rows;
-}
-
-function endSession(sessionId) {
-  const db = getDb();
-  db.prepare(
-    'UPDATE sessions SET ended_at = datetime(\'now\') WHERE id = ?'
-  ).run(sessionId);
-  db.close();
-}
-
-function getBufferPath(sessionId) {
-  return path.join(BUFFER_DIR, `${sessionId}.jsonl`);
-}
-
-function appendToBuffer(sessionId, role, content) {
-  const bufferPath = getBufferPath(sessionId);
-  const entry = JSON.stringify({
-    role,
-    content,
-    timestamp: new Date().toISOString()
-  }) + '\n';
-  fs.appendFileSync(bufferPath, entry, 'utf8');
-}
-
-function readBuffer(sessionId) {
-  const bufferPath = getBufferPath(sessionId);
-  if (!fs.existsSync(bufferPath)) return [];
-  const lines = fs.readFileSync(bufferPath, 'utf8').trim().split('\n');
-  return lines.filter(Boolean).map(l => JSON.parse(l));
-}
-
-function clearBuffer(sessionId) {
-  const bufferPath = getBufferPath(sessionId);
-  if (fs.existsSync(bufferPath)) fs.unlinkSync(bufferPath);
-}
-
-// ==========================================
-// Archive Database Functions
-// ==========================================
-
-function getArchiveDb() {
-  const db = new Database(ARCHIVE_DB_PATH);
-  db.pragma('journal_mode = WAL');
-  db.pragma('synchronous = NORMAL');
-  return db;
-}
-
-function initArchiveDb() {
-  const db = getArchiveDb();
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS sessions (
-      id TEXT PRIMARY KEY,
-      project_path TEXT,
-      started_at TEXT,
-      ended_at TEXT,
-      total_messages INTEGER DEFAULT 0
-    );
-
-    CREATE TABLE IF NOT EXISTS messages (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      session_id TEXT NOT NULL,
-      role TEXT NOT NULL,
-      content TEXT NOT NULL,
-      timestamp TEXT,
-      FOREIGN KEY (session_id) REFERENCES sessions(id)
-    );
-
-    CREATE TABLE IF NOT EXISTS archive_log (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      archived_at TEXT DEFAULT (datetime('now')),
-      session_id TEXT,
-      message_count INTEGER DEFAULT 0,
-      source TEXT DEFAULT 'auto'
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_archive_messages_session ON messages(session_id);
-    CREATE INDEX IF NOT EXISTS idx_archive_messages_timestamp ON messages(timestamp);
-  `);
-  db.close();
-}
-
-function archiveOldSessions(daysThreshold = 90, source = 'auto') {
-  initArchiveDb();
-
-  const activeDb = getDb();
-  const archiveDb = getArchiveDb();
-
-  const cutoff = new Date(Date.now() - daysThreshold * 24 * 60 * 60 * 1000).toISOString();
-
-  // Find old sessions
-  const oldSessions = activeDb.prepare(
-    'SELECT * FROM sessions WHERE ended_at < ? AND ended_at IS NOT NULL'
-  ).all(cutoff);
-
-  if (oldSessions.length === 0) {
-    activeDb.close();
-    archiveDb.close();
-    return { archived: 0, sessions: [] };
-  }
-
-  const archivedIds = [];
-
-  const archiveTx = archiveDb.transaction(() => {
-    for (const session of oldSessions) {
-      // Copy session to archive
-      archiveDb.prepare(
-        'INSERT OR REPLACE INTO sessions (id, project_path, started_at, ended_at, total_messages) VALUES (?, ?, ?, ?, ?)'
-      ).run(session.id, session.project_path, session.started_at, session.ended_at, session.total_messages);
-
-      // Copy messages to archive
-      const messages = activeDb.prepare(
-        'SELECT * FROM messages WHERE session_id = ? ORDER BY id ASC'
-      ).all(session.id);
-
-      for (const msg of messages) {
-        archiveDb.prepare(
-          'INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)'
-        ).run(msg.session_id, msg.role, msg.content, msg.timestamp);
-      }
-
-      // Log archive event
-      archiveDb.prepare(
-        'INSERT INTO archive_log (session_id, message_count, source) VALUES (?, ?, ?)'
-      ).run(session.id, messages.length, source);
-
-      archivedIds.push(session.id);
+// Parse a JSONL transcript file from Claude Code's projects directory
+function parseJsonlTranscript(transcript_path) {
+    if (!transcript_path || !fs.existsSync(transcript_path)) return null;
+    try {
+        const content = fs.readFileSync(transcript_path, 'utf-8');
+        const lines = content.split('\n').filter(l => l.trim());
+        const messages = [];
+        let skipped = 0;
+        for (const line of lines) {
+            try {
+                const entry = JSON.parse(line);
+                if (entry.type === 'user' || entry.type === 'assistant') {
+                    const msg = entry.message || {};
+                    messages.push({
+                        role: msg.role || entry.type,
+                        content: typeof msg.content === 'string'
+                            ? msg.content
+                            : JSON.stringify(msg.content || ''),
+                        tool_calls: msg.tool_calls || [],
+                        tool_results: msg.tool_results || [],
+                        timestamp: entry.timestamp || new Date().toISOString()
+                    });
+                }
+            } catch (e) {
+                skipped++;
+            }
+        }
+        if (skipped > 0) {
+            console.error(`[DB Utils] Skipped ${skipped} malformed lines in ${transcript_path}`);
+        }
+        return messages.length > 0 ? { messages } : null;
+    } catch (err) {
+        return null;
     }
-  });
+}
 
-  archiveTx();
+// Find transcript path in Claude Code's projects directory by session_id
+function findTranscriptPath(session_id) {
+    const projectsDir = path.join(HOME, '.claude', 'projects');
+    if (!fs.existsSync(projectsDir)) return null;
+    try {
+        const projects = fs.readdirSync(projectsDir);
+        for (const proj of projects) {
+            const candidate = path.join(projectsDir, proj, `${session_id}.jsonl`);
+            if (fs.existsSync(candidate)) return candidate;
+        }
+    } catch (e) { /* ignore */ }
+    return null;
+}
 
-  // Delete from active DB (messages first due to FK)
-  const deleteTx = activeDb.transaction(() => {
-    for (const sessionId of archivedIds) {
-      activeDb.prepare('DELETE FROM messages WHERE session_id = ?').run(sessionId);
-      activeDb.prepare('DELETE FROM clear_events WHERE session_id = ?').run(sessionId);
-      activeDb.prepare('DELETE FROM sessions WHERE id = ?').run(sessionId);
+// Read transcript — accepts explicit path, falls back to projects search
+function readTranscript(session_id, transcript_path) {
+    if (transcript_path) {
+        const parsed = parseJsonlTranscript(transcript_path);
+        if (parsed) return parsed;
     }
-  });
-
-  deleteTx();
-
-  activeDb.close();
-  archiveDb.close();
-
-  return { archived: archivedIds.length, sessions: archivedIds };
+    const found = findTranscriptPath(session_id);
+    if (found) return parseJsonlTranscript(found);
+    return null;
 }
 
-function restoreSession(sessionId) {
-  if (!fs.existsSync(ARCHIVE_DB_PATH)) return false;
-
-  const activeDb = getDb();
-  const archiveDb = getArchiveDb();
-
-  // Check if session exists in archive
-  const session = archiveDb.prepare(
-    'SELECT * FROM sessions WHERE id = ?'
-  ).get(sessionId);
-
-  if (!session) {
-    activeDb.close();
-    archiveDb.close();
-    return false;
-  }
-
-  const restoreTx = activeDb.transaction(() => {
-    // Restore session
-    activeDb.prepare(
-      'INSERT OR REPLACE INTO sessions (id, project_path, started_at, ended_at, total_messages) VALUES (?, ?, ?, ?, ?)'
-    ).run(session.id, session.project_path, session.started_at, session.ended_at, session.total_messages);
-
-    // Restore messages
-    const messages = archiveDb.prepare(
-      'SELECT * FROM messages WHERE session_id = ? ORDER BY id ASC'
-    ).all(sessionId);
-
-    for (const msg of messages) {
-      activeDb.prepare(
-        'INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)'
-      ).run(msg.session_id, msg.role, msg.content, msg.timestamp);
+// Save full conversation — single connection, transaction, batch insert
+function saveFullConversation(conversation_id, project_path, transcript_path) {
+    const transcript = readTranscript(conversation_id, transcript_path);
+    if (!transcript || !transcript.messages || transcript.messages.length === 0) {
+        return Promise.resolve({ success: false, saved: 0 });
     }
-  });
 
-  restoreTx();
+    return new Promise((resolve) => {
+        const db = new sqlite3.Database(DB_PATH);
 
-  // Remove from archive
-  archiveDb.prepare('DELETE FROM messages WHERE session_id = ?').run(sessionId);
-  archiveDb.prepare('DELETE FROM archive_log WHERE session_id = ?').run(sessionId);
-  archiveDb.prepare('DELETE FROM sessions WHERE id = ?').run(sessionId);
+        db.serialize(() => {
+            db.run('BEGIN TRANSACTION');
 
-  activeDb.close();
-  archiveDb.close();
+            // Schema
+            for (const sql of SCHEMA_SQL) {
+                db.run(sql);
+            }
 
-  return true;
+            // Upsert session
+            db.run(
+                `INSERT INTO sessions (id, project_path, started_at, ended_at, total_messages)
+                 VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?)
+                 ON CONFLICT(id) DO UPDATE SET
+                   ended_at = CURRENT_TIMESTAMP,
+                   total_messages = MAX(total_messages, excluded.total_messages),
+                   updated_at = CURRENT_TIMESTAMP`,
+                [conversation_id, project_path, transcript.messages.length]
+            );
+
+            // Batch insert messages
+            const stmt = db.prepare(
+                `INSERT OR IGNORE INTO messages
+                 (session_id, message_index, role, content, tool_calls, tool_results, timestamp)
+                 VALUES (?, ?, ?, ?, ?, ?, ?)`
+            );
+            for (let i = 0; i < transcript.messages.length; i++) {
+                const msg = transcript.messages[i];
+                stmt.run([
+                    conversation_id, i,
+                    msg.role || 'unknown',
+                    typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content || ''),
+                    JSON.stringify(msg.tool_calls || []),
+                    JSON.stringify(msg.tool_results || []),
+                    msg.timestamp || new Date().toISOString()
+                ]);
+            }
+            stmt.finalize();
+
+            // Commit
+            db.run('COMMIT', (err) => {
+                db.close();
+                if (err) {
+                    resolve({ success: false, saved: 0, error: err.message });
+                } else {
+                    resolve({ success: true, saved: transcript.messages.length });
+                }
+            });
+        });
+    });
 }
 
-function restoreAllSessions() {
-  if (!fs.existsSync(ARCHIVE_DB_PATH)) return { restored: 0 };
-
-  const archiveDb = getArchiveDb();
-  const sessions = archiveDb.prepare('SELECT id FROM sessions').all();
-  archiveDb.close();
-
-  let restored = 0;
-  for (const s of sessions) {
-    if (restoreSession(s.id)) restored++;
-  }
-
-  return { restored };
+// Get messages for a specific session
+function getSessionMessages(session_id) {
+    return new Promise((resolve, reject) => {
+        const db = new sqlite3.Database(DB_PATH);
+        db.all(
+            'SELECT role, content, timestamp FROM messages WHERE session_id = ? ORDER BY message_index ASC',
+            [session_id],
+            (err, rows) => {
+                db.close();
+                if (err) reject(err);
+                else resolve(rows || []);
+            }
+        );
+    });
 }
 
-function queryArchive(sql, params = []) {
-  if (!fs.existsSync(ARCHIVE_DB_PATH)) return [];
-  const db = getArchiveDb();
-  try {
-    const rows = db.prepare(sql).all(...params);
-    db.close();
-    return rows;
-  } catch (err) {
-    db.close();
-    throw err;
-  }
-}
-
-function getArchiveStats() {
-  if (!fs.existsSync(ARCHIVE_DB_PATH)) {
-    return { sessions: 0, messages: 0, archived_events: 0 };
-  }
-  const db = getArchiveDb();
-  const stats = {
-    sessions: db.prepare('SELECT COUNT(*) as count FROM sessions').get().count,
-    messages: db.prepare('SELECT COUNT(*) as count FROM messages').get().count,
-    archived_events: db.prepare('SELECT COUNT(*) as count FROM archive_log').get().count
-  };
-  db.close();
-  return stats;
-}
-
-function listArchivedSessions(limit = 50, offset = 0) {
-  if (!fs.existsSync(ARCHIVE_DB_PATH)) return [];
-  const db = getArchiveDb();
-  const rows = db.prepare(
-    'SELECT id, project_path, started_at, ended_at, total_messages FROM sessions ORDER BY ended_at DESC LIMIT ? OFFSET ?'
-  ).all(limit, offset);
-  db.close();
-  return rows;
-}
-
-function deleteArchivedSessionsOlderThan(days) {
-  if (!fs.existsSync(ARCHIVE_DB_PATH)) return { deleted: 0 };
-
-  const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
-  const db = getArchiveDb();
-
-  const oldSessions = db.prepare(
-    'SELECT id FROM sessions WHERE ended_at < ?'
-  ).all(cutoff);
-
-  if (oldSessions.length === 0) {
-    db.close();
-    return { deleted: 0 };
-  }
-
-  const deleteTx = db.transaction(() => {
-    for (const s of oldSessions) {
-      db.prepare('DELETE FROM messages WHERE session_id = ?').run(s.id);
-      db.prepare('DELETE FROM archive_log WHERE session_id = ?').run(s.id);
-      db.prepare('DELETE FROM sessions WHERE id = ?').run(s.id);
-    }
-  });
-
-  deleteTx();
-  db.close();
-
-  return { deleted: oldSessions.length };
+// Check if session exists in DB
+function validateSession(session_id) {
+    return new Promise((resolve, reject) => {
+        const db = new sqlite3.Database(DB_PATH);
+        db.get(
+            'SELECT id, total_messages FROM sessions WHERE id = ?',
+            [session_id],
+            (err, row) => {
+                db.close();
+                if (err) reject(err);
+                else resolve(!!row);
+            }
+        );
+    });
 }
 
 module.exports = {
-  DB_PATH,
-  ARCHIVE_DB_PATH,
-  BUFFER_DIR,
-  getDb,
-  initDb,
-  createSession,
-  insertMessage,
-  insertClearEvent,
-  getSessionMessages,
-  endSession,
-  getBufferPath,
-  appendToBuffer,
-  readBuffer,
-  clearBuffer,
-  // Archive functions
-  getArchiveDb,
-  initArchiveDb,
-  archiveOldSessions,
-  restoreSession,
-  restoreAllSessions,
-  queryArchive,
-  getArchiveStats,
-  listArchivedSessions,
-  deleteArchivedSessionsOlderThan
+    DB_PATH,
+    initDatabase,
+    saveSession,
+    saveMessage,
+    parseJsonlTranscript,
+    findTranscriptPath,
+    readTranscript,
+    saveFullConversation,
+    getSessionMessages,
+    validateSession
 };

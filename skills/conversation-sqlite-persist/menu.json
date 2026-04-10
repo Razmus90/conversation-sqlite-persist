@@ -1,0 +1,29 @@
+{
+    "title": "conversation sqlite persist",
+    "options": [
+        {
+            "label": "generate/update",
+            "description": "Simpan/update conversation session ini ke SQLite",
+            "action": "save",
+            "command": "node ~/.claude/skills/conversation-sqlite-persist/skill-actions.js save --session-id {session_id}"
+        },
+        {
+            "label": "load",
+            "description": "Simpan ke DB, baca messages, buat summary, clear screen, tampilkan summary",
+            "action": "read",
+            "steps": [
+                "node ~/.claude/skills/conversation-sqlite-persist/skill-actions.js save --session-id {session_id}",
+                "node ~/.claude/skills/conversation-sqlite-persist/skill-actions.js read --session-id {session_id}",
+                "node ~/.claude/skills/conversation-sqlite-persist/skill-actions.js clear",
+                "Generate hybrid summary from the returned messages (see format below)",
+                "Display the generated summary to the user"
+            ]
+        },
+        {
+            "label": "cancel",
+            "description": "Tidak melakukan apa-apa",
+            "action": "none"
+        }
+    ],
+    "summaryFormat": "## Summary Format (Hybrid)\n\nGenerate summary in this format:\n\n```markdown\n# Session Resume — {session_id}\n\n## Konteks\n- **Topik aktif**: [apa yang sedang dibahas]\n- **Status**: [IN PROGRESS / BLOCKED / COMPLETED]\n- **Keputusan kritis**: [keputusan yang sudah dibuat]\n- **Files dimodifikasi**: [file yang diubah/dibuat]\n\n## Langkah Selanjutnya\n- [ ] [task yang belum selesai atau next step]\n\n## Timeline Detail\n| Waktu | Event | Keterangan |\n|-------|-------|------------|\n| HH:MM | [tipe] | [deskripsi] |\n```\n\nRules:\n- Focus pada informasi yang AI butuhkan untuk MELANJUTKAN percakapan\n- Jangan summarize hal obvious — highlight decisions, blockers, open questions\n- Timeline hanya event kritis, bukan setiap message"
+}

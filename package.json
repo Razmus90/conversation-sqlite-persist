@@ -1,7 +1,7 @@
 {
   "name": "conversation-sqlite-persist",
-  "version": "1.1.0",
-  "description": "Zero-miss conversation persistence for Claude Code. Auto-saves to SQLite with /clear detection, compaction backup, session-end save, and archive/restore system.",
+  "version": "1.2.0",
+  "description": "Menu untuk save/load/summarize conversation dari SQLite database. Auto-saves via hooks with transcript parsing.",
   "main": "bin/install.js",
   "bin": {
     "conversation-sqlite-persist": "bin/install.js",
@@ -16,14 +16,12 @@
     "skill",
     "sqlite",
     "conversation",
-    "persistence",
-    "backup",
-    "archive"
+    "persistence"
   ],
   "author": "",
   "license": "MIT",
   "dependencies": {
-    "better-sqlite3": "^11.0.0"
+    "sqlite3": "^5.1.0"
   },
   "engines": {
     "node": ">=18.0.0"
