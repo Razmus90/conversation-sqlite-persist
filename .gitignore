@@ -1,0 +1,30 @@
+# Dependencies
+node_modules/
+package-lock.json
+
+# SQLite databases (user data)
+*.db
+*.db-wal
+*.db-shm
+
+# Buffer files
+*.jsonl
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+logs/
+
+# Backup files
+*.bak
+*.backup

@@ -1,0 +1,34 @@
+{
+  "name": "conversation-sqlite-persist",
+  "version": "1.0.0",
+  "description": "Zero-miss conversation persistence for Claude Code. Auto-saves all conversations to SQLite.",
+  "type": "skill",
+  "entrypoint": "skills/conversation-sqlite-persist/SKILL.md",
+  "hooks": {
+    "beforeSubmitPrompt": [
+      {
+        "command": "node hooks/detect-clear.js",
+        "description": "Detect /clear and backup before clear"
+      },
+      {
+        "command": "node hooks/capture-user-message.js",
+        "description": "Capture user messages to SQLite"
+      }
+    ],
+    "preCompact": [
+      {
+        "command": "node hooks/pre-compact-backup.js",
+        "description": "Backup before context compaction"
+      }
+    ],
+    "sessionEnd": [
+      {
+        "command": "node hooks/final-save.js",
+        "description": "Final save on session end"
+      }
+    ]
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.0.0"
+  }
+}
